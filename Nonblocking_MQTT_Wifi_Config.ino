@@ -8,7 +8,9 @@
 
 #include <EEPROM.h>
 
+#define DEVICE_NAME "MYDEVICE"
 #define CONFIG_LED 25
+#define CONFIG_BUTTON 0
 
 WiFiManager wifi_manager;
 WiFiClient esp_client;
@@ -19,17 +21,19 @@ PubSubClient client(esp_client);
 typedef struct
 {
   int   salt = EEPROM_SALT;
-  char mqtt_server[256]  = "";
-  char mqtt_port[6] = "";
+  char mqtt_server[256]  = "mqtt_server";
+  char mqtt_port[6] = "1883";
+  char mqtt_name[256] = "DEVICE_NAME";
 } MQTTSettings;
 MQTTSettings mqtt_settings;
 
 WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_settings.mqtt_server, 256);
 WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_settings.mqtt_port, 6);
+WiFiManagerParameter custom_mqtt_name("name", "mqtt_name", mqtt_settings.mqtt_name, 256);
 
 void eeprom_read()
 {
-  EEPROM.begin(512);
+  EEPROM.begin(1024);
   EEPROM.get(0, mqtt_settings);
   EEPROM.end();
 }
@@ -37,7 +41,7 @@ void eeprom_read()
 
 void eeprom_saveconfig()
 {
-  EEPROM.begin(512);
+  EEPROM.begin(1024);
   EEPROM.put(0, mqtt_settings);
   EEPROM.commit();
   EEPROM.end();
@@ -45,6 +49,8 @@ void eeprom_saveconfig()
 
 bool should_save_config = false;
 bool is_config_ui_active = false;
+int config_portal_start = 0;
+bool is_config_portal_timeout_active = false;
 
 /*********************************************************************************/
 
@@ -77,14 +83,19 @@ void configModeCallback (WiFiManager *myWiFiManager) {
 //=======================================================
 void mqtt_message_callback(char* topic, byte* payload, unsigned int length) {
   // handle message arrived
+  Serial.print("MQTT RX: ");
+  Serial.print(topic);
+  Serial.print(": ");
+  Serial.println((char *)payload);
 }
 
 boolean mqtt_reconnect() {
-  if (client.connect("MYDEVICE")) {
+  client.setServer(mqtt_settings.mqtt_server, atoi(mqtt_settings.mqtt_port));
+  if (client.connect(mqtt_settings.mqtt_name)) {
     // Once connected, publish an announcement...
-    client.publish("outTopic","hello world");
+    client.publish("test_topic_out","hello world");
     // ... and resubscribe
-    client.subscribe("inTopic");
+    client.subscribe("test_topic_in");
   }
   return client.connected();
 }
@@ -92,12 +103,27 @@ boolean mqtt_reconnect() {
 
 char setup_ssid[64];
 
+void mqtt_reconnect_wrapper()
+{
+  if(mqtt_reconnect()) //returns true on sucessfull connection
+  {
+    Serial.println("Connected to MQTT Server");
+    configUiExitCallback();
+  }
+  else
+  {
+    Serial.println("Failed to connect to MQTT, starting config portal");
+    wifi_manager.startConfigPortal(setup_ssid);
+  }  
+}
+
 void setup() {
     WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP 
     Serial.begin(115200);
     Serial.println("\n Starting");
 
     pinMode(CONFIG_LED, OUTPUT);
+    pinMode(CONFIG_BUTTON, INPUT);
 
     client.setCallback(mqtt_message_callback);
 
@@ -109,49 +135,83 @@ void setup() {
       mqtt_settings = defaults;
     }
 
-    wifi_manager.resetSettings();
+    Serial.print("New MQTT Server: ");
+    Serial.println(mqtt_settings.mqtt_server);
+    Serial.print("New MQTT Port: ");
+    Serial.println(mqtt_settings.mqtt_port);
+    Serial.print("New MQTT Name: ");
+    Serial.println(mqtt_settings.mqtt_name);
+
+    //wifi_manager.resetSettings();
     wifi_manager.addParameter(&custom_mqtt_server);
     wifi_manager.addParameter(&custom_mqtt_port);
+    wifi_manager.addParameter(&custom_mqtt_name);
     wifi_manager.setConfigPortalBlocking(false);
     wifi_manager.setSaveParamsCallback(saveConfigCallback);
     wifi_manager.setAPCallback(configModeCallback);
     
-    sprintf(setup_ssid, "MYDEVICE-%d", String(WIFI_getChipId(),HEX)); //change here 
+    sprintf(setup_ssid, "%s-%s", DEVICE_NAME, String(WIFI_getChipId(),HEX));
     Serial.print("Setup SSID: ");
     Serial.println(setup_ssid);
 
-    if(wifi_manager.autoConnect(setup_ssid)){
-        Serial.println("connected...yeey :)");
+    wifi_manager.setConnectTimeout(10);
+
+    if(wifi_manager.autoConnect(setup_ssid))
+    {
+      Serial.println("Connected to WiFi");
+      mqtt_reconnect_wrapper();
     }
-    else {
-        Serial.println("Configportal running");
+    else
+    {
+      Serial.println("Configportal running");
     }
 
 }
 
 void loop() {
   bool is_connected = wifi_manager.process();
+
+  //check for the closing of the config UI
+  //if MQTT fails to connect, re-open the UI
   if (should_save_config & is_connected)
   {
     should_save_config = false;
     strcpy(mqtt_settings.mqtt_server, custom_mqtt_server.getValue());
     strcpy(mqtt_settings.mqtt_port, custom_mqtt_port.getValue());
+    strcpy(mqtt_settings.mqtt_name, custom_mqtt_name.getValue());
     eeprom_saveconfig();
     
     Serial.print("New MQTT Server: ");
     Serial.println(mqtt_settings.mqtt_server);
     Serial.print("New MQTT Port: ");
     Serial.println(mqtt_settings.mqtt_port);
+    Serial.print("New MQTT Name: ");
+    Serial.println(mqtt_settings.mqtt_name);
+    
+    is_config_portal_timeout_active = false;
+    Serial.println("Connected to WiFi");
+    mqtt_reconnect_wrapper();
+  }
 
-    client.setServer(mqtt_settings.mqtt_server, atoi(mqtt_settings.mqtt_port));
+  //check for button press to trigger config UI
+  if((digitalRead(CONFIG_BUTTON) == false) & (is_config_ui_active == false))
+  {
+    config_portal_start = millis();
+    is_config_portal_timeout_active = true;
+    wifi_manager.startConfigPortal(setup_ssid);
+  }
 
-    if(mqtt_reconnect()) //returns true on sucessfull connection
+  //check for on-demand config portal timeout
+  if((is_config_portal_timeout_active == true) & (millis() > config_portal_start + 120000))
+  {
+    is_config_portal_timeout_active = false;
+    wifi_manager.stopConfigPortal();
+    if(wifi_manager.autoConnect(setup_ssid))
     {
-      configUiExitCallback();
-    }
-    else
-    {
-      wifi_manager.startConfigPortal();
+      Serial.println("Connected to WiFi");
+      mqtt_reconnect_wrapper();
     }
   }
+
+  client.loop();
 }
