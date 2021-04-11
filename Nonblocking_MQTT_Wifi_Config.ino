@@ -44,6 +44,7 @@ void eeprom_saveconfig()
 }
 
 bool should_save_config = false;
+bool is_config_ui_active = false;
 
 /*********************************************************************************/
 
@@ -52,14 +53,44 @@ void saveConfigCallback () {
     should_save_config = true;
 }
 
+void configUiActiveCallback() 
+{
+  is_config_ui_active = true;
+  digitalWrite(CONFIG_LED, HIGH); //LED ON
+}
+
+void configUiExitCallback() 
+{
+  is_config_ui_active = false;
+  digitalWrite(CONFIG_LED, LOW); //LED ON
+}
+
 void configModeCallback (WiFiManager *myWiFiManager) {
   Serial.println("Entered config mode");
   Serial.println(WiFi.softAPIP());
 
   Serial.println(myWiFiManager->getConfigPortalSSID());
   
-  digitalWrite(CONFIG_LED, HIGH); //LED ON
+  configUiActiveCallback();
 }
+
+//=======================================================
+void mqtt_message_callback(char* topic, byte* payload, unsigned int length) {
+  // handle message arrived
+}
+
+boolean mqtt_reconnect() {
+  if (client.connect("MYDEVICE")) {
+    // Once connected, publish an announcement...
+    client.publish("outTopic","hello world");
+    // ... and resubscribe
+    client.subscribe("inTopic");
+  }
+  return client.connected();
+}
+//======================================================
+
+char setup_ssid[64];
 
 void setup() {
     WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP 
@@ -67,6 +98,8 @@ void setup() {
     Serial.println("\n Starting");
 
     pinMode(CONFIG_LED, OUTPUT);
+
+    client.setCallback(mqtt_message_callback);
 
     eeprom_read();
     if (mqtt_settings.salt != EEPROM_SALT)
@@ -82,8 +115,7 @@ void setup() {
     wifi_manager.setConfigPortalBlocking(false);
     wifi_manager.setSaveParamsCallback(saveConfigCallback);
     wifi_manager.setAPCallback(configModeCallback);
-
-    char setup_ssid[32];
+    
     sprintf(setup_ssid, "MYDEVICE-%d", String(WIFI_getChipId(),HEX)); //change here 
     Serial.print("Setup SSID: ");
     Serial.println(setup_ssid);
@@ -110,7 +142,16 @@ void loop() {
     Serial.println(mqtt_settings.mqtt_server);
     Serial.print("New MQTT Port: ");
     Serial.println(mqtt_settings.mqtt_port);
-    
-    digitalWrite(CONFIG_LED, LOW); //LED OFF 
+
+    client.setServer(mqtt_settings.mqtt_server, atoi(mqtt_settings.mqtt_port));
+
+    if(mqtt_reconnect()) //returns true on sucessfull connection
+    {
+      configUiExitCallback();
+    }
+    else
+    {
+      wifi_manager.startConfigPortal();
+    }
   }
 }
