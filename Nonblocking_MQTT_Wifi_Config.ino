@@ -46,14 +46,10 @@ void eeprom_saveconfig()
 bool should_save_config = false;
 
 /*********************************************************************************/
-bool last_is_in_config_mode = false;
-bool is_in_config_mode = false;
-
 
 //callback notifying us of the need to save config
 void saveConfigCallback () {
     should_save_config = true;
-    is_in_config_mode = false;
 }
 
 void configModeCallback (WiFiManager *myWiFiManager) {
@@ -61,8 +57,8 @@ void configModeCallback (WiFiManager *myWiFiManager) {
   Serial.println(WiFi.softAPIP());
 
   Serial.println(myWiFiManager->getConfigPortalSSID());
-
-  is_in_config_mode = true;
+  
+  digitalWrite(CONFIG_LED, HIGH); //LED ON
 }
 
 void setup() {
@@ -102,8 +98,8 @@ void setup() {
 }
 
 void loop() {
-  wifi_manager.process();
-  if (should_save_config)
+  bool is_connected = wifi_manager.process();
+  if (should_save_config & is_connected)
   {
     should_save_config = false;
     strcpy(mqtt_settings.mqtt_server, custom_mqtt_server.getValue());
@@ -114,18 +110,7 @@ void loop() {
     Serial.println(mqtt_settings.mqtt_server);
     Serial.print("New MQTT Port: ");
     Serial.println(mqtt_settings.mqtt_port);
+    
+    digitalWrite(CONFIG_LED, LOW); //LED OFF 
   }
-  if(last_is_in_config_mode != is_in_config_mode)
-  {
-    if(is_in_config_mode)
-    {
-      digitalWrite(CONFIG_LED, HIGH); //LED ON
-    }
-    else
-    {
-      digitalWrite(CONFIG_LED, LOW); //LED OFF 
-    }
-  }
-  last_is_in_config_mode = is_in_config_mode;
-
 }
